@@ -299,7 +299,7 @@ func generatePrompt(naturalLanguage string) string {
 	config, _ := LoadConfig("")
 	additionalPrompts := handleSysPromptFile(config.SysPromptFile)
 
-	basePrompt := fmt.Sprintf(`You are a Unix command generator for %s. Convert the following natural language request into a Unix command appropriate for this operating system. Only return the command, nothing else.`, osInfo)
+	basePrompt := fmt.Sprintf(`You are a Unix command generator for %s. Convert the following natural language request into a Unix command appropriate for this operating system. Only return the command, nothing else. Do not wrap the response in markdown, backticks, or any delimiters.`, osInfo)
 
 	if additionalPrompts != "" {
 		return fmt.Sprintf(`%s
@@ -384,6 +384,146 @@ func CreateLLMClient(config *Config) (LLMClient, error) {
 		return &GeminiClient{APIKey: config.GeminiKey, Model: config.GeminiModel}, nil
 	default:
 		return nil, fmt.Errorf("unsupported LLM provider: %s", config.Provider)
+	}
+}
+
+// shellescape escapes a string for safe use in shell commands
+func shellescape(s string) string {
+	// Simple shell escaping - wrap in single quotes and escape any single quotes
+	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+// SessionState maintains state between command executions
+type SessionState struct {
+	WorkingDir string
+	EnvVars    map[string]string
+}
+
+// NewSessionState creates a new session state
+func NewSessionState() *SessionState {
+	wd, _ := os.Getwd()
+	return &SessionState{
+		WorkingDir: wd,
+		EnvVars:    make(map[string]string),
+	}
+}
+
+// ExecuteCommand executes a Unix command with session state persistence
+func ExecuteCommandWithState(state *SessionState, command string) error {
+	if command == "" {
+		return fmt.Errorf("no command generated")
+	}
+
+	if strings.TrimSpace(command) == "" {
+		return fmt.Errorf("empty command")
+	}
+
+	// Get the user's current shell from environment variable
+	shell := os.Getenv("SHELL")
+	if shell == "" {
+		shell = "/bin/sh"
+	}
+
+	// Build command that preserves and captures state
+	// First, export all tracked environment variables, then run the command, then capture new state
+	envExports := ""
+	for k, v := range state.EnvVars {
+		envExports += fmt.Sprintf("export %s=%s\n", k, shellescape(v))
+	}
+	
+	stateCommand := fmt.Sprintf(`
+		cd "%s"
+		%s
+		%s
+		echo "UC_STATE_SEPARATOR"
+		pwd
+		echo "UC_ENV_SEPARATOR"
+		env | grep -E '^[A-Za-z_][A-Za-z0-9_]*=' | grep -v '^_' | sort
+	`, state.WorkingDir, envExports, command)
+
+	cmd := exec.Command(shell, "-c", stateCommand)
+
+	// Set current environment variables
+	cmd.Env = os.Environ()
+	for k, v := range state.EnvVars {
+		cmd.Env = append(cmd.Env, fmt.Sprintf("%s=%s", k, v))
+	}
+
+	// Capture both stdout and stderr
+	var stdoutBuf, stderrBuf bytes.Buffer
+	cmd.Stdout = &stdoutBuf
+	cmd.Stderr = &stderrBuf
+
+	colorCommand.Printf("%s\n", command)
+	os.Stdout.Sync()
+
+	err := cmd.Run()
+
+	// Parse output to separate command output from state info
+	output := stdoutBuf.String()
+	parts := strings.Split(output, "UC_STATE_SEPARATOR")
+
+	if len(parts) >= 2 {
+		// Show command output (everything before the separator)
+		commandOutput := strings.TrimSpace(parts[0])
+		if commandOutput != "" {
+			fmt.Print(commandOutput)
+			if !strings.HasSuffix(commandOutput, "\n") {
+				fmt.Println()
+			}
+		}
+
+		// Parse state information
+		stateParts := strings.Split(parts[1], "UC_ENV_SEPARATOR")
+		if len(stateParts) >= 2 {
+			// Update working directory
+			newWd := strings.TrimSpace(stateParts[0])
+			if newWd != "" {
+				state.WorkingDir = newWd
+			}
+
+			// Update environment variables (simplified)
+			envOutput := strings.TrimSpace(stateParts[1])
+			if envOutput != "" {
+				state.updateEnvVars(envOutput)
+			}
+		}
+	} else {
+		// Fallback: just show all output
+		fmt.Print(output)
+	}
+
+	os.Stdout.Sync()
+	os.Stderr.Sync()
+
+	if err != nil {
+		if stderrOutput := strings.TrimSpace(stderrBuf.String()); stderrOutput != "" {
+			colorError.Fprintf(os.Stderr, "Error: %s\n", stderrOutput)
+			os.Stderr.Sync()
+		} else {
+			colorError.Fprintf(os.Stderr, "Command failed: %v\n", err)
+			os.Stderr.Sync()
+		}
+		return err
+	}
+
+	return nil
+}
+
+// updateEnvVars updates tracked environment variables
+func (s *SessionState) updateEnvVars(envOutput string) {
+	lines := strings.Split(envOutput, "\n")
+	for _, line := range lines {
+		if strings.Contains(line, "=") {
+			parts := strings.SplitN(line, "=", 2)
+			if len(parts) == 2 {
+				key := strings.TrimSpace(parts[0])
+				value := strings.TrimSpace(parts[1])
+				if key != "" && !strings.HasPrefix(key, "_") { // Skip internal vars
+					s.EnvVars[key] = value
+				}
+			}
+		}
 	}
 }
 
@@ -544,53 +684,6 @@ func (c *GeminiClient) GetProviderInfo() string {
 	return fmt.Sprintf("Gemini (%s)", c.Model)
 }
 
-// ExecuteCommand executes a Unix command
-func ExecuteCommand(command string) error {
-	if command == "" {
-		return fmt.Errorf("no command generated")
-	}
-
-	if strings.TrimSpace(command) == "" {
-		return fmt.Errorf("empty command")
-	}
-
-	// Execute the command through shell to handle wildcards and other shell features
-	cmd := exec.Command("/bin/sh", "-c", command)
-	cmd.Stdout = os.Stdout
-	cmd.Stdin = os.Stdin
-
-	// Capture stderr to show it in case of error
-	var stderrBuf bytes.Buffer
-	cmd.Stderr = &stderrBuf
-
-	colorCommand.Printf("%s\n", command)
-
-	// Ensure output is flushed before command execution
-	os.Stdout.Sync()
-
-	err := cmd.Run()
-
-	// Ensure output is flushed after command execution
-	os.Stdout.Sync()
-	os.Stderr.Sync()
-
-	if err != nil {
-		// Always display stderr output if there is any
-		if stderrOutput := strings.TrimSpace(stderrBuf.String()); stderrOutput != "" {
-			// Print to stderr with color and ensure it's flushed
-			colorError.Fprintf(os.Stderr, "Error: %s\n", stderrOutput)
-			os.Stderr.Sync()
-		} else {
-			// If no stderr output, show the error from cmd.Run()
-			colorError.Fprintf(os.Stderr, "Command failed: %v\n", err)
-			os.Stderr.Sync()
-		}
-		return err
-	}
-
-	return nil
-}
-
 func main() {
 	// Parse command-line flags
 	configPath := flag.String("config", "", "Path to configuration file (default: ~/.uc.json)")
@@ -618,16 +711,18 @@ func main() {
 		// Non-interactive mode: execute single command
 		naturalLanguage := strings.Join(args, " ")
 		fmt.Printf("%s\n", naturalLanguage)
-		processCommand(llmClient, naturalLanguage, *dryRun)
+		state := NewSessionState()
+		processCommand(llmClient, state, naturalLanguage, *dryRun)
 		return
 	}
 
 	// Interactive mode
-	runInteractiveMode(llmClient, *dryRun)
+	state := NewSessionState()
+	runInteractiveMode(llmClient, state, *dryRun)
 }
 
 // runInteractiveMode runs the interactive REPL loop
-func runInteractiveMode(llmClient LLMClient, dryRun bool) {
+func runInteractiveMode(llmClient LLMClient, state *SessionState, dryRun bool) {
 	osInfo := detectOS()
 	llmInfo := llmClient.GetProviderInfo()
 
@@ -718,13 +813,13 @@ func runInteractiveMode(llmClient LLMClient, dryRun bool) {
 		}
 
 		// Process the command
-		processCommand(llmClient, input, dryRun)
+		processCommand(llmClient, state, input, dryRun)
 		fmt.Println() // Add blank line for readability
 	}
 }
 
 // processCommand processes a single natural language command
-func processCommand(llmClient LLMClient, naturalLanguage string, dryRun bool) {
+func processCommand(llmClient LLMClient, state *SessionState, naturalLanguage string, dryRun bool) {
 	// Create and start spinner while generating command
 	s := createSpinner("Generating command...")
 	s.Start()
@@ -753,7 +848,7 @@ func processCommand(llmClient LLMClient, naturalLanguage string, dryRun bool) {
 	}
 
 	// Execute the generated command
-	if err := ExecuteCommand(unixCommand); err != nil {
+	if err := ExecuteCommandWithState(state, unixCommand); err != nil {
 		handleCommandError(err, "Error executing command")
 	}
 }
