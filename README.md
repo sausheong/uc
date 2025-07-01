@@ -1,6 +1,6 @@
 # Unix Commands with Natural Language (uc)
 
-A command line application that uses AI/LLM to interpret natural language commands and execute them as Unix utilities. Features an interactive mode with command history, OS detection, colorful output, and customizable system prompts.
+A command line application that uses AI/LLM to interpret natural language commands and execute them as Unix utilities. Features an interactive mode with command history, OS detection, colorful output, and customizable system prompts. Supports multiple LLM providers including Ollama (default), OpenAI, and Google Gemini.
 
 ## Features
 
@@ -8,15 +8,15 @@ A command line application that uses AI/LLM to interpret natural language comman
 - **Multiple LLM Support**: Works with Ollama (default), OpenAI, and Google Gemini
 - **JSON Configuration**: `.uc.json` configuration in your home directory
 - **Interactive Mode**: REPL with command history and arrow key support
-- **Colorful Interface**: Professional color-coded output using `github.com/fatih/color`
-- **Loading Spinner**: Visual feedback during LLM processing with `github.com/briandowns/spinner`
 - **Dry-Run Mode**: Preview commands without executing them (`-n` flag or `dryrun` command)
 - **OS Detection**: Automatically detects your Unix OS for context-aware commands
-- **Custom System Prompts**: Customize LLM behavior with your own prompt file
+- **Custom System Prompts**: Customize LLM behavior with your own prompt file (`uc.prompts` by default)
 - **Command History**: Persistent history with `.uc_history` file
 - **Smart Command Generation**: AI-powered Unix command generation
 - **Robust Error Handling**: Clear feedback when commands can't be executed
 - **Professional Output**: Clean, emoji-free interface suitable for enterprise environments
+- **Environment Variable Tracking**: Maintains and tracks environment variables between commands (see example below)
+- **Command Line Editing**: Full readline support with keyboard shortcuts (Ctrl+A, Ctrl+E, etc.)
 
 ## Installation
 
@@ -47,6 +47,17 @@ UC uses a JSON configuration file located at `~/.uc.json`. On first run, it will
 }
 ```
 
+Configuration options:
+- `provider`: Default LLM provider (ollama, openai, or gemini)
+- `ollama_url`: URL for Ollama API (default: http://localhost:11434)
+- `ollama_model`: Model to use with Ollama (default: llama3.2)
+- `openai_key`: Your OpenAI API key (required for OpenAI provider)
+- `openai_model`: Model to use with OpenAI (default: gpt-4.1-mini)
+- `gemini_key`: Your Google Gemini API key (required for Gemini provider)
+- `gemini_model`: Model to use with Gemini (default: gemini-2.5-flash)
+- `sys_prompt_file`: Path to custom system prompts file (default: uc.prompts)
+```
+
 ### Custom Configuration Path
 
 You can specify a custom configuration file:
@@ -57,6 +68,28 @@ uc --config /path/to/custom.json "your command"
 
 ## Usage
 
+### Environment Variable Persistence
+
+UC maintains environment variables between commands in interactive mode. Here's an example:
+
+```bash
+uc> set environment variable NAME to John
+# Sets NAME=John for subsequent commands
+
+uc> echo my name is $NAME
+my name is John
+
+uc> set environment variable GREETING to "Hello, $NAME!"
+# Environment variables are expanded when setting new ones
+
+uc> echo $GREETING
+Hello, John!
+
+# Environment variables persist between commands
+uc> echo $NAME $GREETING
+John Hello, John!
+```
+
 ### Interactive Mode (Default)
 
 Run without arguments to start interactive mode:
@@ -65,7 +98,7 @@ Run without arguments to start interactive mode:
 uc
 ```
 
-This starts a REPL (Read-Eval-Print Loop) with enhanced features:
+This starts a REPL (Read-Eval-Print Loop) with enhanced features. The prompt shows the current OS and LLM provider being used.
 
 ```
 uc (macOS 15.5) - Ollama (llama3.2)
@@ -307,9 +340,6 @@ go mod tidy
 
 # Build
 go build -o uc
-
-# Run tests
-go test ./...
 
 # Install globally (optional)
 sudo mv uc /usr/local/bin/
